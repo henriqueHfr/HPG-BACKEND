@@ -1,10 +1,15 @@
+import os
+import random
+
 from flask import request, jsonify
+from flask_mail import Message
 from helpers.verificaToken import verificaToken
 from models.usuario import Usuarios
 from models.gestaoPessoal import GestaoPessoal
-from main import app, db
+from main import app, db, mail
 from flask_bcrypt import check_password_hash, generate_password_hash
 import jwt
+import random
 import datetime
 
 
@@ -72,8 +77,9 @@ def cadastroUsuarios():
 @app.route('/home', methods=['POST'])
 def home():
     data = request.json
-    token = data.get('token')
-    response = verificaToken(token)
+    token = request.headers.get('x-access-tokens')
+    email = data.get('email')
+    response = verificaToken(token, email)
 
     if response == True:
         return jsonify({"error": "usuario autenticado"}), 200
@@ -86,9 +92,8 @@ def home():
 @app.route('/gestaoPessoal', methods=['POST'])
 def gestaopessoal():
     data = request.json
-    token = data.get('token')
+    token = request.headers.get('x-access-tokens')
     email = data.get('email')
-    print(data)
     response = verificaToken(token, email)
     if response == True:
         return jsonify({"message": "usuario autenticado "}), 200
@@ -102,36 +107,40 @@ def gestaopessoal():
 def criarNovoCardPessoal():
     data = request.json
     email = data.get('email')
-    token = data.get('token')
-    titutlo = data.get('titulo')
+    token = request.headers.get('x-access-tokens')
+    titulo = data.get('titulo')
     conteudo = data.get('conteudo')
     data_hora = data.get('data')
-    print(data)
 
-    response = verificaToken(token)
-    print(response)
+    response = verificaToken(token, email)
     if response:
-        usuario = Usuarios.query.filter_by(email=email).first()
-        print(usuario)
-        card = GestaoPessoal(titulo=titutlo, conteudo=conteudo, user_id=usuario.id, data_hora=data_hora)
-        print(card)
+        usuario = Usuarios.query.filter_by(email=email, token_auth=token).first()
+        card = GestaoPessoal(titulo=titulo, conteudo=conteudo, user_id=usuario.id, data_hora=data_hora)
         db.session.add(card)
         db.session.commit()
-
-        return jsonify({"message": "card criada com sucesso"}), 201
+        msg = Message('Card novo criado no HPG', sender=os.environ.get('MAIL_USERNAME'),
+                      recipients=[usuario.email],
+                      body=f'''Venho informar que foi criado um novo card no HPG\n\n\n
+titulo:{titulo},\n
+Conteudo: {conteudo},\n
+Data e hora do termino: {data_hora}
+                                   '''
+                      )
+        mail.send(msg)
+        return jsonify({"message": "Card criada com sucesso"}), 201
     else:
-        return jsonify({"error": "não foi possivel criar o card!"}), 401
+        return jsonify({"error": "Não foi possível criar o card!"}), 401
 
-    return jsonify({"error": "algo inesperado aconteceu, tente novamente"}), 500
+    return jsonify({"error": "Algo inesperado aconteceu, tente novamente"}), 500
 
 
 @app.route('/buscaCardPessoal', methods=['POST'])
 def buscaCardPessoal():
     data = request.json
     email = data.get('email')
-    token = data.get('token')
+    token = request.headers.get('x-access-tokens')
 
-    response = verificaToken(token)
+    response = verificaToken(token, email)
 
     if response:
         usuario = Usuarios.query.filter_by(email=email, token_auth=token).first()
@@ -159,3 +168,65 @@ def deletaCardPessoal():
         return jsonify({"error": str(e)}), 500
 
     return jsonify({"error": "algo inesperado aconteceu, tente novamente"}), 401
+
+
+@app.route('/resetSenha', methods=['POST'])
+def resetSenha():
+    data = request.json
+    email = data.get('email')
+
+    usuario = Usuarios.query.filter_by(email=email).first()
+    if not usuario:
+        return jsonify({"error": "Usuário não possui cadastro"}), 401
+
+    random_numbers = ''.join([str(random.randint(0, 9)) for _ in range(6)])
+    hashed_token = generate_password_hash(random_numbers).decode('utf-8')
+    msg = Message('Codigo para resetar senha',
+                  sender=os.environ.get('MAIL_USERNAME'),
+                  recipients=[usuario.email],
+                  body=f'''Codigo para efetuar o reset do seu usuário.\n\n\
+Numero : {random_numbers}
+                  '''
+                  )
+    mail.send(msg)
+
+    usuario.token_reset = hashed_token
+    db.session.commit()
+
+    return jsonify(dict(message="Usuário conectado",
+                            token=hashed_token)), 200
+
+@app.route('/verificaCodeReset', methods=['POST'])
+def verificaCodeReset():
+    data = request.json
+    token = data.get('token')
+    code = data.get('code')
+    usuario = Usuarios.query.filter_by(token_reset=token).first()
+    code_sem_hash = check_password_hash(usuario.token_reset, code)
+
+    if usuario and code_sem_hash:
+        return jsonify({"message": "codigo autenticado com sucesso"}), 200
+
+    if not code_sem_hash:
+        return jsonify({"message": "codigo de autenticação errado"}), 401
+
+    return jsonify({"error": "algo inesperado aconteceu, tente novamente"}), 401
+
+
+@app.route('/atualizaSenha', methods=['POST'])
+def atualizaSenha():
+    data = request.json
+    token = data.get('token')
+    senha = data.get('senha')
+    email = data.get('email')
+    if token and senha and email:
+        usuario = Usuarios.query.filter_by(email=email, token_reset = token).first()
+        if usuario:
+            senha_hash = generate_password_hash(senha)
+            usuario.senha = senha_hash
+            usuario.token_reset = None
+            db.session.commit()
+            return jsonify({"success": "Senha atualizada com sucesso"}), 200
+
+    return jsonify({"error": "Algo inesperado aconteceu"}), 400
+
