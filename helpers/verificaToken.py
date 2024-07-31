@@ -1,9 +1,15 @@
+import jwt
+from main import app
 from models.usuario import Usuarios
 
-def verificaToken(token, email):
-    if not token or not email:
+def verificaToken(token):
+    try:
+        data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
+        usuario = Usuarios.query.filter_by(id=data['id']).first()
+        if usuario:
+            return True
+    except jwt.ExpiredSignatureError:
         return False
-    if Usuarios.query.filter_by(email=email, token_auth=token).first():
-        return True
-    else:
+    except jwt.InvalidTokenError:
         return False
+    return False
